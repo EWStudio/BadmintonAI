@@ -1,0 +1,11 @@
+.venv/
+.venv-intel/
+.venv-test/
+vendor/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.zip
+*.pkg
+*.dmg
