@@ -1,0 +1,4 @@
+{"clip": "videos/demo.mp4", "frame_base": 0, "fps": 30,
+ "note": "hand-labelled contact frames; rally ends at 380 when the near player's smash hits the net",
+ "hits": [[29,"far"],[47,"near"],[93,"far"],[104,"near"],[130,"far"],[147,"near"],[171,"far"],
+          [215,"near"],[253,"far"],[267,"near"],[286,"far"],[310,"near"],[338,"far"],[378,"near"]]}

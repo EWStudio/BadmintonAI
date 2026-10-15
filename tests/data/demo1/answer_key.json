@@ -1,0 +1,6 @@
+{"clip": "videos/demo1.mp4", "frame_base": 0, "fps": 30,
+ "note": "serve frame approximate; rally ends at ~990 when the far player's shot lands in the near court",
+ "hits": [[14,"near"],[78,"far"],[112,"near"],[135,"far"],[164,"near"],[189,"far"],[235,"near"],[260,"far"],
+          [288,"near"],[322,"far"],[356,"near"],[379,"far"],[409,"near"],[451,"far"],[481,"near"],[506,"far"],
+          [537,"near"],[586,"far"],[610,"near"],[640,"far"],[703,"near"],[742,"far"],[778,"near"],[811,"far"],
+          [842,"near"],[885,"far"],[913,"near"],[948,"far"]]}

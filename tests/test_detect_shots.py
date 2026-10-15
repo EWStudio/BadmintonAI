@@ -9,7 +9,8 @@ import csv
 import numpy as np
 import pytest
 
-from hits.badminton_ai.detect_shots import DEFAULT, detect_shots, load_ball_csv, trajectory_stats
+from hits.badminton_ai.detect_shots import (DEFAULT, _drop_excursions, _Run, _sent_nowhere, detect_shots,
+                                             load_ball_csv, trajectory_stats)
 from hits.badminton_ai.types import ShuttlePosition
 from tests.synth import Rally, standard_rally
 
@@ -116,6 +117,41 @@ def test_frozen_tracker_stretch_is_dropped_without_phantoms():
     # The jumps into and out of a latched stretch are huge fake accelerations.
     near_edges = [f for f in _frames(res) if min(abs(f - 64), abs(f - 76)) <= 2]
     assert near_edges == []
+
+
+def test_tracker_excursion_is_dropped_without_phantoms():
+    for seed in range(5):
+        r = standard_rally(seed)
+        pos = r.positions(1.0)
+        g = r.contacts[2] + 10                     # detector jumps to a white shirt for 2 frames
+        for k in (g, g + 1):
+            pos[k].x, pos[k].y = pos[k].x + 45, pos[k].y - 35
+        res = detect_shots(pos, FPS, W, H)
+        hits, false = _match(r.contacts, _frames(res))
+        assert res.stats["excursion_points_dropped"] == 2
+        assert hits == r.contacts and false == [], (seed, false)
+
+
+def test_excursion_filter_never_removes_a_stroke_frame():
+    for seed in range(20):
+        vis = [(p.frame_index, p.x, p.y) for p in standard_rally(seed).positions(1.0) if p.visible]
+        assert _drop_excursions(vis, DEFAULT, FPS, H) == vis, seed
+
+
+def test_ballistic_echoes_of_acceleration_peaks_are_suppressed():
+    echoes = 0
+    for seed in range(20):
+        res = detect_shots(standard_rally(seed).positions(1.0), FPS, W, H)
+        echoes += sum("echo of an acceleration peak" in c.reason for c in res.rejected)
+    assert echoes > 0
+
+
+def test_shuttle_that_goes_nowhere_after_a_candidate_is_not_struck():
+    frames = np.arange(12)
+    P = np.array([[600.0 + 12 * min(f, 6) + 0.4 * max(f - 6, 0), 400.0] for f in frames])
+    run = _Run(frames, P)
+    assert _sent_nowhere(run, 6, clip_median_speed=12.0, cfg=DEFAULT) is not None
+    assert _sent_nowhere(run, 2, clip_median_speed=12.0, cfg=DEFAULT) is None
 
 
 def test_camera_cut_is_not_a_stroke_when_cuts_are_known():

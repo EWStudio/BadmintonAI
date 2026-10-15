@@ -19,8 +19,11 @@ Then rejection rules, each one added because of a measured failure:
 
 * camera cuts / close-ups   -> split runs at cuts, drop runs that barely move
 * frozen tracker            -> drop stretches pinned to one coordinate
-* serve release             -> a racket can only strike a shuttle already in flight
-* floor landing             -> low in the frame AND never rises again
+* tracker excursions        -> drop 1-2 frame jumps whose neighbours share one arc
+* ballistic echoes          -> drop a fit window that contains an acceleration peak
+* serve release            -> a racket can only strike a shuttle already in flight
+* no departure              -> a stroke sends the shuttle away; a tumble over the net does not
+* floor landing           -> low in the frame AND never rises again
 * run edges                 -> derivatives at the first/last frames are artefacts
 
 And one recovery rule:
@@ -58,6 +61,12 @@ class Config:
     # --- trajectory cleaning ---------------------------------------------
     frozen_min_run: int = 4           # >= this many frames at one coordinate = tracker latched
     frozen_tol_px: float = 1.0        # a real apex holds still for at most ~3 frames
+    excursion_max_len: int = 2        # tracker jumps to a shirt or racket and back
+    excursion_context: int = 3        # clean frames needed on each side
+    excursion_min_px: float = 8.0
+    excursion_ratio: float = 3.0      # jump must exceed this x the context fit residual
+    excursion_max_bend: float = 1.7   # frame heights / s^2: velocity change free flight allows
+                                      # across a glitch; strokes measured 2.5-6x more
     max_interp_gap: int = 3           # bridge dropouts up to this many frames
     min_run_len: int = 10             # shorter runs cannot support the detectors
     min_run_median_step_px: float = 1.5   # runs that barely move: close-ups, static latch
@@ -76,6 +85,8 @@ class Config:
     # --- rejection rules ---------------------------------------------------
     min_inflight_speed_fraction: float = 0.20   # release ~0.11, slowest real stroke ~0.34
     inflight_lookback: int = 8
+    min_departure_speed_fraction: float = 0.25  # net tumbles, latches 0.11-0.25; slowest real stroke 0.57
+    departure_frames: int = 4
     floor_y_fraction: float = 0.75    # highest real stroke 0.68, bounces 0.80-0.85
     floor_rise_fraction: float = 0.03 # bounces rose 0.000-0.007; only applied below floor_y_fraction
     floor_rise_window: int = 15
@@ -181,6 +192,44 @@ def _drop_frozen(visible: list[Point], min_run: int = 4, tol: float = 1.0) -> li
                 keep[k] = False
         i = j
     return [p for p, k in zip(visible, keep) if k]
+
+
+def _drop_excursions(visible: list[Point], cfg: Config, fps: float, height: int) -> list[Point]:
+    """Discard 1-2 frame jumps off the flight path.
+
+    The frames either side of a tracker glitch move at the same velocity, give
+    or take what gravity and drag can bend in that time. Either side of a
+    stroke they do not -- and a parabola through both sides cuts the corner of
+    the stroke, so the velocity test is what keeps strokes in.
+    """
+    k = cfg.excursion_context
+    n = len(visible)
+    if n < 2 * k + 1:
+        return visible
+    bend = cfg.excursion_max_bend * height / fps ** 2
+    F = np.array([p[0] for p in visible], float)
+    P = np.array([[p[1], p[2]] for p in visible], float)
+    drop: set[int] = set()
+    for j in range(k, n - k):
+        for m in range(1, cfg.excursion_max_len + 1):
+            if j + m + k > n:
+                break
+            ctx = list(range(j - k, j)) + list(range(j + m, j + m + k))
+            if F[ctx[-1]] - F[ctx[0]] > 2 * k + m:
+                continue
+            v_before = (P[j - 1] - P[j - k]) / (F[j - 1] - F[j - k])
+            v_after = (P[j + m + k - 1] - P[j + m]) / (F[j + m + k - 1] - F[j + m])
+            if np.linalg.norm(v_after - v_before) > bend * (m + k):
+                continue
+            t = F[ctx]
+            cx, cy = np.polyfit(t, P[ctx, 0], 2), np.polyfit(t, P[ctx, 1], 2)
+            resid = float(np.max(np.hypot(np.polyval(cx, t) - P[ctx, 0], np.polyval(cy, t) - P[ctx, 1])))
+            te = F[j:j + m]
+            dev = float(np.min(np.hypot(np.polyval(cx, te) - P[j:j + m, 0], np.polyval(cy, te) - P[j:j + m, 1])))
+            if dev >= max(cfg.excursion_min_px, cfg.excursion_ratio * resid):
+                drop.update(range(j, j + m))
+                break
+    return [p for i, p in enumerate(visible) if i not in drop]
 
 
 def _interpolate(visible: list[Point], max_gap: int, cuts: set[int]) -> list[Point]:
@@ -308,6 +357,15 @@ def _released_not_struck(run: _Run, i: int, clip_median_speed: float, cfg: Confi
     return frac if frac < cfg.min_inflight_speed_fraction else None
 
 
+def _sent_nowhere(run: _Run, i: int, clip_median_speed: float, cfg: Config) -> Optional[float]:
+    """A stroke sends the shuttle away; a tumble over the net or a latched tracker does not."""
+    sp = run.speed[i:i + cfg.departure_frames]
+    if len(sp) < cfg.departure_frames or clip_median_speed <= 0:
+        return None
+    frac = float(np.mean(sp)) / clip_median_speed
+    return frac if frac < cfg.min_departure_speed_fraction else None
+
+
 def _floor_landing(run: _Run, i: int, height: int, cfg: Config) -> Optional[float]:
     """Low in the picture AND never comes back up.
 
@@ -369,6 +427,8 @@ def detect_shots(
     visible = sorted((p.frame_index, float(p.x), float(p.y))
                      for p in positions if p.visible and p.x is not None)
     cleaned = _drop_frozen(visible, cfg.frozen_min_run, cfg.frozen_tol_px)
+    n_unfrozen = len(cleaned)
+    cleaned = _drop_excursions(cleaned, cfg, fps, height)
     track = _interpolate(cleaned, cfg.max_interp_gap, cuts)
 
     runs, dropped_runs = [], 0
@@ -380,7 +440,8 @@ def detect_shots(
 
     stats = trajectory_stats(positions)
     stats.update(runs=len(runs), dropped_runs=dropped_runs,
-                 frozen_points_dropped=len(visible) - len(cleaned))
+                 frozen_points_dropped=len(visible) - n_unfrozen,
+                 excursion_points_dropped=n_unfrozen - len(cleaned))
     if stats["duplicate_fraction"] > cfg.duplicate_warn_fraction:
         stats["warning"] = (f"{stats['duplicate_fraction']:.0%} of consecutive positions are identical: "
                             "the video is probably padded (e.g. 30 fps content in a 60 fps container). "
@@ -399,11 +460,13 @@ def detect_shots(
 
     # (frame, confidence, detector, run, index)
     cands: list[tuple[int, float, str, _Run, int]] = []
+    fit_echoes: list[RejectedCandidate] = []
     for r in runs:
         n = len(r.frames)
         lo, hi = cfg.edge_margin, n - cfg.edge_margin
         acc = _accel_signal(r)
-        for i in _local_maxima(acc, lo, hi, accel_thr):
+        peaks = _local_maxima(acc, lo, hi, accel_thr)
+        for i in peaks:
             cands.append((int(r.frames[i]), min(1.0, acc[i] / accel_thr - 1.0), "accel", r, i))
         bal = _ballistic_signal(r, cfg, clip_speed)
         last = -10 ** 9
@@ -414,6 +477,12 @@ def detect_shots(
             if i - last <= cfg.ballistic_horizon:
                 continue
             last = i
+            echo = [a for a in peaks if i - cfg.ballistic_window < a < i]
+            if echo:
+                fit_echoes.append(RejectedCandidate(int(r.frames[i]), "ballistic",
+                                                    "echo of an acceleration peak (frames after it)",
+                                                    float(i - echo[-1])))
+                continue
             cands.append((int(r.frames[i]), min(1.0, bal[i] / cfg.ballistic_threshold - 1.0),
                           "ballistic", r, i))
 
@@ -428,6 +497,10 @@ def detect_shots(
         if rise is not None:
             rejected.append(RejectedCandidate(f, det, "floor landing (rise after / frame height)", rise))
             continue
+        dep = _sent_nowhere(r, i, clip_speed, cfg)
+        if dep is not None:
+            fit_echoes.append(RejectedCandidate(f, det, "sent nowhere (speed after / clip median)", dep))
+            continue
         kept.append(c)
 
     # A rejected release or landing is one physical event; the detectors can
@@ -440,6 +513,7 @@ def detect_shots(
                                           float(min(c[0] - v for v in vetoed if c[0] > v))))
     echo_ids = {id(c) for c in echoes}
     kept = [c for c in kept if id(c) not in echo_ids]
+    rejected.extend(fit_echoes)
 
     # Off-screen strokes: the shuttle left the top of the frame and came back.
     max_gap = cfg.offscreen_max_gap_s * fps

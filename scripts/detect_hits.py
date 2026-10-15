@@ -6,14 +6,13 @@ import csv
 import json
 import os
 import sys
-from dataclasses import replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from hits.adapter import (PLAYER_NAMES, PLAYER_REGIONS, decimate, find_duplicate_frames,  # noqa: E402
-                          load_run, padding_period, with_tracknet)
-from hits.badminton_ai.attribute import LOOKBACK, attribute_strokes  # noqa: E402
-from hits.badminton_ai.detect_shots import detect_shots  # noqa: E402
+from hits.adapter import (PLAYER_NAMES, PLAYER_REGIONS, find_duplicate_frames, load_run,  # noqa: E402
+                          padding_period, with_tracknet)
+from hits.contact import REACH_M  # noqa: E402
+from hits.pipeline import find_hits, padded  # noqa: E402
 
 
 def _ingest(run, source: str | None, mode: str):
@@ -24,12 +23,10 @@ def _ingest(run, source: str | None, mode: str):
         print(f"Ingest check skipped: source video not found ({src}). Pass --source to enable it.")
         return None
     dups = find_duplicate_frames(src)
-    period = padding_period(dups)
-    share = len(dups) / max(1, run.n_frames)
-    if period and share >= 0.05:
-        dec = decimate(run, dups)
+    dec = padded(run, dups)
+    if dec:
         print(f"Ingest: {len(dups)} of {run.n_frames} frames are copies of the previous frame "
-              f"(every {period}th) -> {dec.true_fps:.2f} fps content in a {run.fps:g} fps file. "
+              f"(every {padding_period(dups)}th) -> {dec.true_fps:.2f} fps content in a {run.fps:g} fps file. "
               f"Detecting on the {len(dec.kept)} real frames.")
         return dec
     if dups:
@@ -47,6 +44,8 @@ def main() -> int:
                     help="use this TrackNetV3 <clip>_ball.csv for the shuttle instead of Good-Badminton's")
     ap.add_argument("--sensitivity", type=float, default=1.0,
                     help="< 1 finds more hits and more false positives (default 1.0)")
+    ap.add_argument("--reach", type=float, default=REACH_M, metavar="METRES",
+                    help=f"drop hits with no wrist within this distance of the shuttle (default {REACH_M}; 0 = off)")
     ap.add_argument("--no-alternation", action="store_true",
                     help="attribute by wrist distance only (no singles alternation rule)")
     ap.add_argument("--source", help="source video for the ingest check (default: path in metadata.json)")
@@ -66,29 +65,14 @@ def main() -> int:
     else:
         print("Shuttle and wrists: Good-Badminton (pass --tracknet <clip>_ball.csv if you have it)")
     dec = _ingest(run, a.source, a.decimate)
-    work = dec.run if dec else run
-    to_orig = dec.to_original if dec else (lambda f: f)
-
-    res = detect_shots(work.positions, work.fps, work.width, work.height,
-                       cut_frames=work.cut_frames, sensitivity=a.sensitivity)
-    attributed = attribute_strokes(res.events, work.poses, work.positions, work.diagonal, work.fps,
-                                   cut_frames=work.cut_frames, alternation=not a.no_alternation)
-
-    events, contacts = [], []
-    for e in attributed:
-        contact = e.frame_index if e.inferred else max(0, e.frame_index - LOOKBACK)
-        f = to_orig(e.frame_index)
-        events.append(replace(e, frame_index=f, time_s=f / run.fps))
-        contacts.append(to_orig(contact))
-    rejected = [replace(c, frame_index=to_orig(c.frame_index)) for c in res.rejected]
-    s = dict(res.stats)
-    s["dropouts"] = [(to_orig(x), to_orig(y)) for x, y in s.get("dropouts", [])]
-    if dec:
-        s["decimated"] = {"dropped_frames": dec.dropped, "true_fps": dec.true_fps}
+    found = find_hits(run, dec, sensitivity=a.sensitivity, reach_m=a.reach, alternation=not a.no_alternation)
+    if found.note:
+        print(found.note)
+    events, contacts, rejected, s = found.events, found.contacts, found.rejected, found.stats
 
     print(f"\nShuttle tracked in {s['tracked_fraction']:.0%} of {s['frames']} frames | "
           f"{s.get('runs', 0)} usable runs ({s.get('dropped_runs', 0)} dropped) | "
-          f"{len(run.cut_frames)} cuts | {run.width}x{run.height} @ {work.fps:.4g} fps")
+          f"{len(run.cut_frames)} cuts | {run.width}x{run.height} @ {s['fps']:.4g} fps")
     if s["dropouts"]:
         print("Dropouts >= 5 frames:", ", ".join(f"{x}-{y}" for x, y in s["dropouts"]))
     if "warning" in s:
@@ -123,7 +107,8 @@ def main() -> int:
                                "gb_region": PLAYER_REGIONS[e.player_id]} for e, c in zip(events, contacts)],
                    "rejected": [c.__dict__ for c in rejected],
                    "stats": s, "cut_frames": run.cut_frames,
-                   "settings": {"sensitivity": a.sensitivity, "alternation": not a.no_alternation,
+                   "settings": {"sensitivity": a.sensitivity, "reach_m": a.reach,
+                                "alternation": not a.no_alternation,
                                 "decimate": a.decimate,
                                 "shuttle_source": a.tracknet or "good-badminton"}},
                   fh, indent=2)

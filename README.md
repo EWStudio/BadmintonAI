@@ -2,7 +2,7 @@
 
 ![macOS](https://img.shields.io/badge/macOS-11%2B-lightgrey)
 ![Python](https://img.shields.io/badge/python-3.10--3.12-blue)
-![Tests](https://img.shields.io/badge/tests-36%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-51%20passing-brightgreen)
 
 macOS installers, compatibility patches and a hit-detection add-on for
 [Good-Badminton](https://github.com/yo-WASSUP/Good-Badminton), an open-source
@@ -50,14 +50,14 @@ Output for the 14-second sample clip bundled with Good-Badminton.
 
 | # | Time | Player | Evidence | Detector |
 |---|---|---|---|---|
-| 1 | 1.57 s | near | distance 0.62 | accel+ballistic |
-| 2 | 2.03 s | far | distance 0.15 | off-screen inference |
-| 3 | 3.03 s | near | elimination 0.00 | accel |
-| 4 | 3.47 s | far | distance 0.28 | accel+ballistic |
-| 5 | 3.73 s | near | alternation 0.11 | ballistic |
-| 6 | 4.43 s | far | distance 0.82 | accel+ballistic |
+| 1 | 1.57 s | near | distance 0.74 | accel |
+| 2 | 3.03 s | far | distance 0.27 | accel |
+| 3 | 3.47 s | near | distance 0.46 | accel+ballistic |
+| 4 | 4.17 s | far | distance 0.77 | accel+ballistic |
+| 5 | 4.87 s | near | alternation 0.65 | accel+ballistic |
+| 6 | 5.67 s | far | distance 0.70 | accel+ballistic |
 
-First 6 of 17; the full list is in [`hits.csv`](docs/demo/hits.csv).
+First 6 of 13; the full list is in [`hits.csv`](docs/demo/hits.csv).
 
 ### Player positions
 
@@ -66,15 +66,17 @@ First 6 of 17; the full list is in [`hits.csv`](docs/demo/hits.csv).
   <img src="docs/demo/match_scatter.png" width="45%" alt="Position scatter plot">
 </p>
 
-17 hits were reported. On frames 0–150, checked by hand, 4 of 6 real hits were
-found, with 3 false detections, and 2 of 4 were credited to the right player.
-See [Validation](#validation).
+Against a hand-labelled answer key for the whole clip: 13 of 14 real hits
+found (the low serve is missed), no false hits, and all 13 credited to the
+right player. See [Validation](#validation).
 
 ## Features
 
 - **One-command setup** for Apple Silicon and Intel Macs, isolated in its own virtual environment.
 - **Upstream patches** for macOS: optional tkinter, Metal/CPU device selection, no export timeout, English output.
 - **Hit detection and attribution**: when each shot was played and by which player, using the badminton-ai stage 5 detector and attribution.
+- **False-hit filtering**: a hit counts only if a player's wrist was within reach of the shuttle, measured in metres through the court calibration; tracker glitches, detector echoes and a shuttle tumbling over the net are discarded.
+- **Scoring against an answer key**: `score_hits.py` reports precision, recall and attribution accuracy on any hand-labelled clip.
 - **Padded frame-rate detection**: finds duplicated frames (e.g. 25 fps content in a 30 fps file) and detects on the real frames.
 - **TrackNetV3 input**: optionally replace Good-Badminton's shuttle track with a TrackNetV3 trajectory.
 - **Verification outputs**: a contact sheet of every hit and an annotated video.
@@ -114,7 +116,7 @@ flowchart TB
 
     subgraph HD["Hit detection"]
         direction LR
-        A["Adapter<br/>frames · players · wrists"] --> I["Ingest check<br/>true frame rate"] --> D["Hit detector<br/>acceleration · ballistic arc"] --> AT["Attribution<br/>wrist distance · alternation"]
+        A["Adapter<br/>frames · players · wrists"] --> I["Ingest check<br/>true frame rate"] --> D["Hit detector<br/>acceleration · ballistic arc"] --> RC["Reach check<br/>wrist within 1.3 m"] --> AT["Attribution<br/>wrist distance · alternation"]
     end
 
     O2["Hit results<br/>hits.csv · hits video · verification sheet"]
@@ -138,8 +140,9 @@ flowchart TB
 | Analysis | Player tracking | Court position, distance and speed per player | NumPy |
 | Hit detection | Adapter | Convert pipeline output: frame numbering, players, wrists, cuts | Python dataclasses |
 | Hit detection | Ingest check | Detect padded video and recover the true frame rate | OpenCV frame differencing |
-| Hit detection | Hit detector | Find strikes from abrupt acceleration and departures from a ballistic arc | NumPy |
-| Hit detection | Attribution | Credit each strike to the player whose wrist is nearest, alternating within a rally | NumPy |
+| Hit detection | Hit detector | Find strikes from abrupt acceleration and departures from a ballistic arc; drop tracker glitches, echoes and shuttles that are not sent anywhere | NumPy |
+| Hit detection | Reach check | Keep a strike only if a wrist was within reach of the shuttle; merge the same player hitting twice within 0.5 s | NumPy, court homography |
+| Hit detection | Attribution | Credit each strike to the player whose wrist was nearest in metres, alternating within a rally | NumPy |
 | Hit detection | Renderer | Verification sheet and annotated video | OpenCV, FFmpeg |
 
 **Stack:** Python · PyTorch · Ultralytics YOLO11 · RTMPose · ONNX Runtime · OpenCV · NumPy · SciPy · FFmpeg · pytest
@@ -250,13 +253,29 @@ python ../../scripts/detect_hits.py outputs/match --tracknet path/to/match_ball.
 |---|---|
 | `--tracknet BALL_CSV` | Use a TrackNetV3 trajectory for the shuttle; Good-Badminton supplies wrists only. Recommended. |
 | `--sensitivity S` | Below 1.0 finds more hits and more false positives. Default 1.0. |
+| `--reach METRES` | Drop hits with no wrist this close to the shuttle. Default 1.3; `0` turns the check off. |
 | `--no-alternation` | Attribute by wrist distance only. |
 | `--decimate {auto,off}` | Drop padded duplicate frames before detection. Default `auto`. |
 | `--source VIDEO` | Source video for the padding check. Default: path in `metadata.json`. |
 | `--video VIDEO` | Video to annotate. Default: the run's `detect_<name>.mp4`. |
 | `--no-video`, `--no-montage` | Skip the annotated video or the contact sheet. |
 
-### 3. Inspect a run
+### 3. Score against an answer key
+
+Label the contact frames of a clip by hand (0-based, as in `hits.csv`):
+
+```json
+{"hits": [[47, "near"], [93, "far"], [104, "near"]]}
+```
+
+```bash
+python ../../scripts/score_hits.py outputs/match match_answer_key.json
+```
+
+Prints hits found, false hits, misses and attribution accuracy, with the
+frames of each error. A hit within 0.2 s of a labelled contact counts as found.
+
+### 4. Inspect a run
 
 ```bash
 python ../../scripts/compare_runs.py outputs/demo/detections.jsonl
@@ -305,12 +324,17 @@ Frame numbers in `hits.*` are 0-based. Player 0 is near (Good-Badminton
 │   ├── fetch_weights.sh       Model weights from the v0.1.0 release
 │   ├── patch_for_mac.py       Upstream patches (--check, --revert)
 │   ├── detect_hits.py         Hit detection CLI
+│   ├── score_hits.py          Score hits.csv against an answer key
 │   └── compare_runs.py        Run summary and TrackNetV3 comparison
 ├── hits/
 │   ├── badminton_ai/          badminton-ai stage 5 and attribution
 │   ├── adapter.py             Good-Badminton output → stage 5 inputs
+│   ├── contact.py             Reach check and same-player merge
+│   ├── pipeline.py            Detection → reach check → attribution
+│   ├── score.py               Answer-key scoring
 │   └── render.py              Contact sheet and annotated video
 ├── tests/
+│   └── data/                  Tracking data and answer keys for both sample clips
 ├── docs/demo/                 Sample outputs shown in this README
 └── vendor/Good-Badminton/     Created by setup, git-ignored
 ```
@@ -333,9 +357,13 @@ writes `.orig` backups and is reverted with `--revert`.
 
 1. **Load** `detections.jsonl`: frames converted to 0-based, `lower`/`upper` mapped to near/far, wrists (COCO keypoints 9/10) assigned confidence 1.0, frames skipped by Good-Badminton treated as camera cuts.
 2. **Ingest check**: frames that repeat their predecessor at a regular period are dropped and detection runs at the true frame rate.
-3. **Detect**: badminton-ai stage 5 (acceleration peaks + ballistic divergence, with rejection rules for serve release, floor landing, frozen tracker and cuts, and off-screen inference).
-4. **Attribute**: wrist distance with a 3-frame lookback, constrained to alternate between players within a rally.
-5. **Map back** to original frame numbers and render.
+3. **Detect**: badminton-ai stage 5 (acceleration peaks + ballistic divergence, with rejection rules for serve release, floor landing, frozen tracker and cuts, and off-screen inference), plus three rules added here:
+   - **Tracker glitches**: 1–2 frame jumps are dropped when the frames either side move at the same velocity, give or take what gravity and drag allow. Either side of a real hit they do not.
+   - **Ballistic echoes**: an arc fit whose window contains an acceleration peak is a repeat of that peak, not a new hit.
+   - **No departure**: a hit sends the shuttle away; a candidate after which the shuttle moves at under 25% of the clip's median speed is a tumble over the net or a stuck detector.
+4. **Reach check**: for each hit, the closest either player's wrist came to the shuttle from 4 frames before to 2 frames after, converted to metres at that player's position on court. No wrist within 1.3 m: rejected. For off-screen strokes, a wrist must come within 1.3 m of the top edge. The same player twice within 0.5 s is one hit.
+5. **Attribute**: the reach distances become the evidence (1 at the shuttle, 0 at 1.3 m), constrained to alternate between players within a rally.
+6. **Map back** to original frame numbers and render.
 
 ## Testing
 
@@ -344,9 +372,11 @@ pip install pytest
 python -m pytest
 ```
 
-36 tests: 28 for stage 5 and attribution and 8 for the adapter,
-covering frame numbering, player mapping, cuts, padded-frame detection,
-decimation round-trip and TrackNetV3 substitution.
+51 tests: 32 for stage 5 and attribution, 8 for the adapter (frame
+numbering, player mapping, cuts, padded-frame detection, decimation
+round-trip, TrackNetV3 substitution), 6 for the reach check and 5 regression
+tests that replay Good-Badminton's tracking of both sample clips against
+their answer keys.
 
 ## Validation
 
@@ -354,31 +384,50 @@ decimation round-trip and TrackNetV3 substitution.
 
 | Platform | Result |
 |---|---|
-| Intel, 2020 MacBook Air (i7-1060NG7, macOS 15.7.4, Python 3.12.10) | Full demo run; 426/426 frames analysed, shuttle in 407 (96%); 303 s for the 14.2 s clip (21× real time); hit detection identical to the Linux run (17 of 17 events) |
+| Intel, 2020 MacBook Air (i7-1060NG7, macOS 15.7.4, Python 3.12.10) | Full demo run; 426/426 frames analysed, shuttle in 407 (96%); 303 s for the 14.2 s clip (21× real time); hit detection identical to the Linux run |
 | x86_64 Linux, Python 3.12 | Full demo run with both pose families; setup script in a simulated macOS environment |
 | Apple Silicon | Dependency resolution only |
 
-### Hit detection on the demo clip
+### Hit detection
 
-The bundled demo is 25 fps content in a 30 fps file; the ingest check removes
-69 duplicated frames. With Good-Badminton's shuttle track, 17 hits are
-reported. Frames 0–150 were checked by hand:
+Both sample clips distributed with Good-Badminton, every contact labelled by
+hand ([`tests/data/`](tests/data)). Both are 25 fps content in a 30 fps file;
+the ingest check removes the duplicated frames. Shuttle track from
+Good-Badminton.
 
-| | Result |
+| Clip | Version | Reported | Found | False | Missed | Right player |
+|---|---|---|---|---|---|---|
+| Men's singles, 14 s, 14 hits | before | 17 | 13 | 4 | 1 | 7 of 13 |
+| | after | 13 | 13 | **0** | 1 | **13 of 13** |
+| Women's singles, 35 s, 28 hits | before | 42 | 27 | 15 | 1 | 16 of 27 |
+| | after | 27 | 27 | **0** | 1 | **27 of 27** |
+
+The miss in both clips is the serve. The false hits came from five sources:
+
+| Source | Rule that removes it |
 |---|---|
-| Hits found | 4 of 6 |
-| False positives | 3 |
-| Correct player | 2 of 4 |
+| Ball detector jumps to a player's white clothing for 1–2 frames | Tracker glitches |
+| Arc fit repeats a real hit 4–7 frames later | Ballistic echoes |
+| Off-screen inference fires on a high lift that simply fell back | Reach check (no wrist near the top edge) |
+| Shuttle slowing high in the air after a clear | Ballistic echoes, reach check |
+| Shuttle tumbling over the net, or the detector stuck on a wrist | No departure, same player within 0.5 s |
 
-Causes: Good-Badminton's ball detector tracks the far player's white clothing
-for ~20 frames; the off-screen rule fires on a high lift (speed ratio 1.87
-against a 2.0 threshold); one error then propagates through the alternation
-chain. Use `--tracknet` and validate on clips with a hand-labelled answer key.
+Each false hit also flipped every later attribution through the alternation
+rule. Attribution additionally moved from pixel distance at 3 frames before
+the detected frame (the near player scored 0 at most of their own hits) to
+distance in metres over a window around contact.
+
+The rules were designed on the men's singles clip. The women's singles clip
+was then run unseen: false hits fell from 15 to 1. That remaining one, a
+shuttle tumbling over the net, led to the no-departure rule, so the second
+clip is not a fully independent test. Score your own footage with
+[`score_hits.py`](#3-score-against-an-answer-key) before relying on the numbers.
 
 ## Known Limitations
 
 - Singles only.
 - Low serves are not detected.
+- Thresholds were set on two broadcast clips from a high camera behind the baseline; other camera positions may need `--reach` adjusted.
 - Camera cuts are only those Good-Badminton skips as non-court frames.
 - Good-Badminton writes wrists without confidence, so spurious wrists count as evidence.
 - Good-Badminton identifies players by court half (`upper`/`lower`); identity does not survive an end change.

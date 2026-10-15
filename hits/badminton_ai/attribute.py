@@ -132,11 +132,19 @@ def attribute_strokes(
     cut_frames: Optional[list[int]] = None,
     alternation: bool = True,
     n_players: int = 2,
+    scores: Optional[list[dict[int, float]]] = None,
 ) -> list[ShotEvent]:
-    """Return copies of ``events`` with ``player_id`` / ``attribution_*`` filled in."""
+    """Return copies of ``events`` with ``player_id`` / ``attribution_*`` filled in.
+
+    ``scores`` replaces the built-in wrist evidence with the caller's, one
+    {player_id: score in [0, 1]} per event.
+    """
     track = {p.frame_index: (p.x, p.y) for p in shuttle if p.visible and p.x is not None}
     players = tuple(range(n_players))
-    all_scores = [score_stroke(e, poses, track, diagonal, players) for e in events]
+    if scores is not None:
+        all_scores = [{p: float(s.get(p, 0.0)) for p in players} for s in scores]
+    else:
+        all_scores = [score_stroke(e, poses, track, diagonal, players) for e in events]
     result = [Attribution(_greedy(s, e.inferred), s, "distance") for e, s in zip(events, all_scores)]
 
     if alternation and n_players == 2:
